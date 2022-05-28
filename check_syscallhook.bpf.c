@@ -58,8 +58,26 @@ static __always_inline void* get_symbol_addr(char *symbol_name)
     return *sym;
 }
 
+static __always_inline void collect_event_uid(struct event *event)
+{
+        uint64_t id;
 
 
+        id = bpf_get_current_uid_gid();
+        event->uid = (uid_t)id;
+        event->gid = id >> 32;
+}
+static __always_inline void collect_event_pid_info(struct event *event)
+{
+        uint64_t id;
+
+        if (unlikely(!event))
+                return;
+
+        id = bpf_get_current_pid_tgid();
+        event->tgid = id >> 32;
+        event->pid = (pid_t)id;
+}
 int syscallsToCheck[]={
 	0,   // read
 	1,   // write
@@ -82,7 +100,7 @@ int syscallsToCheck[]={
 };
 
 int syscallhookflag[NUMBER_OF_SYSCALLS_TO_CHECK_X86];
-const volatile bool debug = false;
+const volatile bool debug = true;
 
 // SEC("tp/sched/sched_process_exec")
 // int handle_exec(struct trace_event_raw_sched_process_exec *ctx)
@@ -104,7 +122,6 @@ const volatile bool debug = false;
 SEC("kretprobe/do_init_module")
 int BPF_KRETPROBE(check_syscall_addr)
 {
-
     
     // bpf_get_current_comm(&event->comm, sizeof(event->comm));
     // for(int i = 0;i<NUMBER_OF_SYSCALLS_TO_CHECK_X86;i++)
@@ -220,7 +237,9 @@ int BPF_KRETPROBE(check_syscall_addr)
         bpf_printk("event error");
         return 0;
     }
-    event->pid = bpf_get_current_pid_tgid() >> 32;
+    event->eventname=0;
+    collect_event_pid_info(event);
+    collect_event_uid(event);
     bpf_get_current_comm(&event->comm, sizeof(event->comm));
     for(int i = 0;i<NUMBER_OF_SYSCALLS_TO_CHECK_X86;i++)
     {
@@ -228,3 +247,95 @@ int BPF_KRETPROBE(check_syscall_addr)
     }
     bpf_ringbuf_submit(event, 0);
 }
+
+
+SEC("lsm/bprm_creds_from_file")
+int BPF_PROG(bprm_creds_from_file, struct linux_binprm *bprm, struct file *file, int ret)
+{
+        bpf_printk("in fileless\n");
+        uint32_t *val, blocked = 0, reason = 0, zero = 0;
+        unsigned int links;
+        struct task_struct *task;
+        struct file *f;
+        const unsigned char *p;
+
+        if (ret != 0 )
+                return ret;
+
+        links = BPF_CORE_READ(file, f_path.dentry, d_inode, __i_nlink);
+        if (links > 0)
+                return ret;
+                
+        struct event * event;
+        bpf_printk("sizeof event %d\n",sizeof(struct event*));
+        event = bpf_ringbuf_reserve(&rb,sizeof(*event),0);
+        if (!event)
+        {
+                bpf_printk("event error");
+                return 0;
+        }
+        p = BPF_CORE_READ(file, f_path.dentry, d_name.name);
+        bpf_probe_read_kernel_str(&event->filename, sizeof(event->filename), p);
+        event->eventname=1;
+        collect_event_pid_info(event);
+        collect_event_uid(event);
+        bpf_get_current_comm(&event->comm, sizeof(event->comm));
+
+        bpf_ringbuf_submit(event, 0); 
+        return -1;
+}
+
+
+
+SEC("lsm/kernel_module_request")
+int BPF_PROG(km_autoload, char *kmod_name, int ret)
+{
+    if (ret != 0)
+        return ret;
+    struct event * event;
+    bpf_printk("sizeof event %d\n",sizeof(struct event*));
+    event = bpf_ringbuf_reserve(&rb,sizeof(*event),0);
+    if (!event)
+    {
+            bpf_printk("event error");
+            return 0;
+    }
+    bpf_probe_read_kernel_str(&event->filename,sizeof(event->filename), kmod_name); 
+    event->eventname=2;
+    collect_event_pid_info(event);
+    collect_event_uid(event);
+    bpf_get_current_comm(&event->comm, sizeof(event->comm));
+
+    bpf_ringbuf_submit(event, 0);
+    return -1;
+}
+
+
+
+SEC("lsm/kernel_read_file")
+int BPF_PROG(km_read_file, struct file *file,
+             enum kernel_read_file_id id, bool contents, int ret)
+{
+    if (ret != 0)
+            return ret;
+    const char *p;
+    struct event * event;
+    bpf_printk("sizeof event %d\n",sizeof(struct event*));
+    event = bpf_ringbuf_reserve(&rb,sizeof(*event),0);
+    if (!event)
+    {
+            bpf_printk("event error");
+            return 0;
+    }
+    p = BPF_CORE_READ(file, f_path.dentry, d_name.name);
+    bpf_probe_read_kernel_str(&event->filename, sizeof(event->filename), p);
+    event->eventname=2;
+    collect_event_pid_info(event);
+    collect_event_uid(event);
+    bpf_get_current_comm(&event->comm, sizeof(event->comm));
+
+    bpf_ringbuf_submit(event, 0);
+    return -1;
+}
+
+

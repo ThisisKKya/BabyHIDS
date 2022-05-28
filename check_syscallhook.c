@@ -124,7 +124,18 @@ static void sig_handler(int sig)
 {
 	exiting = true;
 }
+void bump_memlock_rlimit(void)
+{
+	struct rlimit rlim_new = {
+		.rlim_cur	= RLIM_INFINITY,
+		.rlim_max	= RLIM_INFINITY,
+	};
 
+	if (setrlimit(RLIMIT_MEMLOCK, &rlim_new)) {
+		fprintf(stderr, "Failed to increase RLIMIT_MEMLOCK limit!\n");
+		exit(1);
+	}
+}
 int handle_event(void *ctx, void *data, size_t data_sz)
 {
 	const struct event *e = data;
@@ -137,21 +148,37 @@ int handle_event(void *ctx, void *data, size_t data_sz)
 	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
 
 	// printf("%-8s %-5s %-7d %-16s %s\n", ts, "EXEC", e->pid, e->comm, e->filename);
-	printf("%-8s %-20s %-7d %-16s\n", ts, "Syscall hijacking", e->pid,e->comm);
-	printf("Details:\n");
-	for (int i = 0; i < NUMBER_OF_SYSCALLS_TO_CHECK_X86; i++)
+	switch (e->eventname)
 	{
-		if (e->syscallhookflag[i]==1)
+	case 0:
+		printf("%-8s %-20s %-7d %-7d %-7d %-7d %-16s\n", ts, "Syscall hijacking", e->pid,e->tgid,e->uid,e->gid, e->comm);
+		printf("Details:\n");
+		for (int i = 0; i < NUMBER_OF_SYSCALLS_TO_CHECK_X86; i++)
 		{
+			if (e->syscallhookflag[i]==1)
+			{
 			printf("syscall %d %s is hooked\n",syscallsToCheck[i],syscallname[i]);
-		}
+			}
 		// else
 		// {
 		// 	printf("syscall %d  is safe\n",syscallsToCheck[i]);
 		// }
-		
+		}
+		return 0;
+		break;
+	case 1:
+		printf("%-8s %-20s %-7d %-7d %-7d %-7d %-16s\n", ts, "Fileless attack", e->pid,e->tgid,e->uid,e->gid, e->comm);
+		printf("Details:\n");
+		printf("filename: %s\n",e->filename);
+		break;
+	case 2:
+		printf("%-8s %-20s %-7d %-7d %-7d %-7d %-16s\n", ts, "Kmod invalid load", e->pid,e->tgid,e->uid,e->gid, e->comm);
+		printf("Details:\n");
+		printf("kmod name: %s\n",e->filename);
+		break;
+	default:
+		break;
 	}
-	
 	return 0;
 }
 
@@ -167,7 +194,7 @@ int main(int argc, char **argv)
 	ksym_name_t name_key_test;
 
 
-
+	bump_memlock_rlimit();
 	signal(SIGINT, sig_handler);
 	signal(SIGTERM, sig_handler);
 	if(get_symbol_addr(Address,name))
@@ -297,8 +324,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Failed to create ring buffer\n");
 		goto cleanup;
 	}
-	printf("%-8s %-20s %-7s %-16s\n",
-	       "TIME", "EVENT", "PID", "COMM");
+	printf("%-8s %-20s %-7s %-7s %-7s %-7s %-16s\n",
+	       "TIME", "EVENT", "PID","TGID","UID","GID","COMM");
 	while (!exiting) 
 	{
 		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
