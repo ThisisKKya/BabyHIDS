@@ -2,12 +2,14 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_core_read.h>
+// #include "my_shared_defs.bpf.h"
+#include "my_shared_defs.bpf.h"
 char LICENSE[] SEC("license") = "Dual BSD/GPL";
 
 
 #define MAX_KSYM_NAME_SIZE              64
 #define MAX_KSYMADDR_MAP_ENTRIES        16
-#define NUMBER_OF_SYSCALLS_TO_CHECK_X86 18
+
 // #define GET_FIELD_ADDR(field) __builtin_preserve_access_index(&field)
 #define READ_KERN(ptr)                                                  \
     ({                                                                  \
@@ -16,9 +18,15 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
         bpf_core_read((void *)&_val, sizeof(_val), &ptr);                \
         _val;                                                           \
     })
+
 typedef struct ksym_name {
     char str[MAX_KSYM_NAME_SIZE];
 } ksym_name_t;
+
+struct {
+	__uint(type, BPF_MAP_TYPE_RINGBUF);
+	__uint(max_entries, 256 * 1024 /* 256 KB */);
+} rb SEC(".maps");
 
 struct {                                                    \
     __uint(type, BPF_MAP_TYPE_HASH);                        \
@@ -29,8 +37,8 @@ struct {                                                    \
 
 struct {                                                    \
     __uint(type, BPF_MAP_TYPE_HASH);                        \
-    __uint(max_entries, NUMBER_OF_SYSCALLS_TO_CHECK_X86);          \
-    __type(key, int);                               \
+    __uint(max_entries, NUMBER_OF_SYSCALLS_TO_CHECK_X86);   \
+    __type(key, int);                                       \
     __type(value, u64);                                     \
 } syscalls_to_check_map SEC(".maps");
 
@@ -49,6 +57,8 @@ static __always_inline void* get_symbol_addr(char *symbol_name)
     // bpf_printk("sym == ")
     return *sym;
 }
+
+
 
 int syscallsToCheck[]={
 	0,   // read
@@ -70,9 +80,41 @@ int syscallsToCheck[]={
 	321, // bpf
 	322, // execveat
 };
+
+int syscallhookflag[NUMBER_OF_SYSCALLS_TO_CHECK_X86];
+const volatile bool debug = false;
+
+// SEC("tp/sched/sched_process_exec")
+// int handle_exec(struct trace_event_raw_sched_process_exec *ctx)
+// {
+// 	// unsigned fname_off = ctx->__data_loc_filename & 0xFFFF;
+// 	struct event *e;
+	
+// 	e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
+// 	if (!e)
+// 		return 0;
+
+// 	e->pid = bpf_get_current_pid_tgid() >> 32;
+// 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
+// 	// bpf_probe_read_str(&e->filename, sizeof(e->filename), (void *)ctx + fname_off);
+
+// 	bpf_ringbuf_submit(e, 0);
+// 	return 0;
+// }
 SEC("kretprobe/do_init_module")
 int BPF_KRETPROBE(check_syscall_addr)
 {
+
+    
+    // bpf_get_current_comm(&event->comm, sizeof(event->comm));
+    // for(int i = 0;i<NUMBER_OF_SYSCALLS_TO_CHECK_X86;i++)
+    // {
+    //     event->syscallhookflag[i]=0;
+    // }
+    // bpf_probe_read_str(&event->filename, sizeof(event->filename), (void *)ctx + fname_off);
+
+    
+
     bpf_printk("good1\n");
     int key = 0;
     char syscall_table[MAX_KSYM_NAME_SIZE] = "sys_call_table";
@@ -83,8 +125,9 @@ int BPF_KRETPROBE(check_syscall_addr)
         bpf_printk("failed table_ptr\n");
         return -1;
     }
+
     u64 *syscall_table_addr = (u64*) get_symbol_addr(syscall_table);
-        if (syscall_table_addr == 0)
+    if (syscall_table_addr == 0)
     {
         bpf_printk("failed get syscall_table_addr\n");
         return -1;
@@ -151,12 +194,37 @@ int BPF_KRETPROBE(check_syscall_addr)
         syscall_address[i] = syscall_addr;
         if (syscall_address[i]>(u64)_etext_addr||syscall_address[i]<(u64)_stext_addr)
         {
-            bpf_printk("hooked!!!!!!!!!\nsyscall num:%d   syscall addr %lx\n",index,syscall_address[i]);
+            syscallhookflag[i] = 1;
+            if (debug)
+            {
+                bpf_printk("hooked!!!!!!!!!\nsyscall num:%d   syscall addr %lx\n",index,syscall_address[i]);
+            }
         }
         else
         {
-            bpf_printk("safety\nsyscall num:%d  syscall ptr%lx syscall addr %lx\n",index,&syscall_address[i],syscall_address[i]);
+            syscallhookflag[i] = 0;
+            if (debug)
+            {
+                bpf_printk("safety\nsyscall num:%d  syscall ptr%lx syscall addr %lx\n",index,&syscall_address[i],syscall_address[i]);
+            }
         }
     }
     bpf_printk("good\n");
+    // // 提交事件
+    // bpf_ringbuf_submit(event, 0);
+    struct event * event;
+    bpf_printk("sizeof event %d\n",sizeof(struct event*));
+    event = bpf_ringbuf_reserve(&rb,sizeof(*event),0);
+    if (!event)
+    {
+        bpf_printk("event error");
+        return 0;
+    }
+    event->pid = bpf_get_current_pid_tgid() >> 32;
+    bpf_get_current_comm(&event->comm, sizeof(event->comm));
+    for(int i = 0;i<NUMBER_OF_SYSCALLS_TO_CHECK_X86;i++)
+    {
+        event->syscallhookflag[i]=syscallhookflag[i];
+    }
+    bpf_ringbuf_submit(event, 0);
 }

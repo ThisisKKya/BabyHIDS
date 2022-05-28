@@ -1,7 +1,11 @@
+#include <errno.h>
 #include <stdio.h>
+#include <time.h>
 #include <unistd.h>
+#include <signal.h>
 #include <sys/resource.h>
 #include <bpf/libbpf.h>
+#include "my_shared_defs.bpf.h"
 // #include <bpf/bpf_helpers.h>
 #include <bpf/bpf.h>
 #include "check_syscallhook.skel.h"
@@ -20,6 +24,10 @@
 
 #define NUMBER_OF_SYSCALLS_TO_CHECK_X86 18
 
+
+const volatile bool debug = false;
+
+
 typedef struct ksym_name {
     char str[MAX_KSYM_NAME_SIZE];
 } ksym_name_t;
@@ -29,6 +37,26 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va
 	return vfprintf(stderr, format, args);
 }
 
+char syscallname[20][NUMBER_OF_SYSCALLS_TO_CHECK_X86]={
+	"read",
+	"write",
+	"open",
+	"close",
+	"ioctl",
+	"socket",
+	"sendto",
+	"recvfrom",
+	"sendmsg",
+	"recvmsg",
+	"execve",
+	"kill",
+	"getdents",
+	"ptrace",
+	"getdents64",
+	"openat",
+	"bpf",
+	"execveat"
+};
 int syscallsToCheck[]={
 	0,   // read
 	1,   // write
@@ -91,10 +119,45 @@ int get_symbol_addr(uint64_t *Address,char name[][MAX_KSYM_NAME_SIZE])
 
 
 
+static volatile bool exiting = false;
+static void sig_handler(int sig)
+{
+	exiting = true;
+}
 
+int handle_event(void *ctx, void *data, size_t data_sz)
+{
+	const struct event *e = data;
+	struct tm *tm;
+	char ts[32];
+	time_t t;
+
+	time(&t);
+	tm = localtime(&t);
+	strftime(ts, sizeof(ts), "%H:%M:%S", tm);
+
+	// printf("%-8s %-5s %-7d %-16s %s\n", ts, "EXEC", e->pid, e->comm, e->filename);
+	printf("%-8s %-20s %-7d %-16s\n", ts, "Syscall hijacking", e->pid,e->comm);
+	printf("Details:\n");
+	for (int i = 0; i < NUMBER_OF_SYSCALLS_TO_CHECK_X86; i++)
+	{
+		if (e->syscallhookflag[i]==1)
+		{
+			printf("syscall %d %s is hooked\n",syscallsToCheck[i],syscallname[i]);
+		}
+		// else
+		// {
+		// 	printf("syscall %d  is safe\n",syscallsToCheck[i]);
+		// }
+		
+	}
+	
+	return 0;
+}
 
 int main(int argc, char **argv)
 {
+	struct ring_buffer *rb = NULL;
 	struct check_syscallhook_bpf *skel;
 	int err;
 	int addr_fd,check_fd;
@@ -104,8 +167,9 @@ int main(int argc, char **argv)
 	ksym_name_t name_key_test;
 
 
-	printf("1\n");
 
+	signal(SIGINT, sig_handler);
+	signal(SIGTERM, sig_handler);
 	if(get_symbol_addr(Address,name))
 		return -1;
 	
@@ -139,12 +203,12 @@ int main(int argc, char **argv)
 	// 初始化map
 	addr_fd = bpf_map__fd(skel->maps.ksymaddr_map);
 	check_fd = bpf_map__fd(skel->maps.syscalls_to_check_map);
-	printf("1\n");
 	for (int tmp = 0; tmp < 3; tmp++)
 	{
-		printf("name: %s addr: %lx\n",name[tmp],Address[tmp]);
+		if (debug)
+			printf("name: %s addr: %lx\n",name[tmp],Address[tmp]);
 		strcpy(name_key.str,name[tmp]);
-		printf("namekey:%s\n",name_key.str);
+		// printf("namekey:%s\n",name_key.str);
 		int ret=bpf_map_update_elem(addr_fd,&name_key,&Address[tmp],BPF_ANY);
 		if (ret == -1) 
 		{
@@ -152,7 +216,25 @@ int main(int argc, char **argv)
         goto cleanup;
 		}			
 	}
+	if (debug)
+	{
 
+		ksym_name_t recheckname[3];
+		uint64_t recheck[3];
+		for (int tmp = 0; tmp < 3; tmp++)
+		{
+			strcpy(recheckname[tmp].str,name[tmp]);
+			int ret =bpf_map_lookup_elem(addr_fd,&recheckname[tmp], &recheck[tmp]);
+			if (ret == -1) 
+			{
+				printf("Failed to recheck\n");
+			}
+			else
+			{
+				printf("index %d is addr %lx\n",tmp,recheck[tmp]);
+			}
+		}
+	}
 	// uint64_t addr_test;
 	// char keyname[MAX_KSYM_NAME_SIZE]="sys_call_table";
 	// printf("name_key.str%s\n",name_key.str);
@@ -185,19 +267,19 @@ int main(int argc, char **argv)
         goto cleanup;
 		}
 	}
-	int syscallsrecheck[NUMBER_OF_SYSCALLS_TO_CHECK_X86];
-	for (int tmp = 0; tmp < NUMBER_OF_SYSCALLS_TO_CHECK_X86; tmp++)
-	{
-		int ret=bpf_map_lookup_elem(check_fd,(void *)&tmp,&syscallsrecheck[tmp]);
-		if (ret == -1) 
-		{
-        printf("Failed to recheck\n");
-		}
-		else
-		{
-			printf("index %d is num %d\n",tmp,syscallsrecheck[tmp]);
-		}
-	}
+	// int syscallsrecheck[NUMBER_OF_SYSCALLS_TO_CHECK_X86];
+	// for (int tmp = 0; tmp < NUMBER_OF_SYSCALLS_TO_CHECK_X86; tmp++)
+	// {
+	// 	int ret=bpf_map_lookup_elem(check_fd,(void *)&tmp,&syscallsrecheck[tmp]);
+	// 	if (ret == -1) 
+	// 	{
+    //     printf("Failed to recheck\n");
+	// 	}
+	// 	else
+	// 	{
+	// 		printf("index %d is num %d\n",tmp,syscallsrecheck[tmp]);
+	// 	}
+	// }
 
 
 	/* Attach tracepoint handler */
@@ -207,16 +289,37 @@ int main(int argc, char **argv)
 		goto cleanup;
 	}
 
-	printf("Successfully started! Please run `sudo cat /sys/kernel/debug/tracing/trace_pipe` "
-	       "to see output of the BPF programs.\n");
-
-	for (;;) {
-		/* trigger our BPF program */
-		fprintf(stderr, ".");
-		sleep(1);
+	// printf("Successfully started! Please run `sudo cat /sys/kernel/debug/tracing/trace_pipe` "
+	//        "to see output of the BPF programs.\n");
+	rb = ring_buffer__new(bpf_map__fd(skel->maps.rb), handle_event, NULL, NULL);
+	if (!rb) {
+		err = -1;
+		fprintf(stderr, "Failed to create ring buffer\n");
+		goto cleanup;
 	}
+	printf("%-8s %-20s %-7s %-16s\n",
+	       "TIME", "EVENT", "PID", "COMM");
+	while (!exiting) 
+	{
+		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
+		/* Ctrl-C will cause -EINTR */
+		if (err == -EINTR) {
+			err = 0;
+			break;
+		}
+		if (err < 0) {
+			printf("Error polling ring buffer: %d\n", err);
+			break;
+		}
+	}	
+	// for (;;) {
+	// 	/* trigger our BPF program */
+	// 	fprintf(stderr, ".");
+	// 	sleep(1);
+	// }
 
 cleanup:
+	ring_buffer__free(rb);
 	check_syscallhook_bpf__destroy(skel);
 	return -err;
 }
