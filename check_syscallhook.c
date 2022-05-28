@@ -176,6 +176,13 @@ int handle_event(void *ctx, void *data, size_t data_sz)
 		printf("Details:\n");
 		printf("kmod name: %s\n",e->filename);
 		break;
+	case 3:
+		// if (strstr(e->comm, "etc") == NULL)
+		// 	return;
+		printf("%-8s %-20s %-7d %-7d %-7d %-7d %-16s\n", ts, "Sensitve file is opened", e->pid,e->tgid,e->uid,e->gid, e->comm);
+		printf("Details:\n");
+		printf("file name: %s\n",e->filename);
+		break;
 	default:
 		break;
 	}

@@ -338,4 +338,30 @@ int BPF_PROG(km_read_file, struct file *file,
     return -1;
 }
 
-
+SEC("tp/syscalls/sys_enter_openat")
+int handle_openat_enter(struct trace_event_raw_sys_enter *ctx)
+{
+    const int sudoers_len = 13;
+    const char *sudoers = "/etc/sudoers";
+    char filename[sudoers_len];
+    bpf_probe_read_user(&filename, sudoers_len, (char*)ctx->args[1]);
+    for (int i = 0; i < sudoers_len; i++) {
+        if (filename[i] != sudoers[i]) {
+            return 0;
+        }
+    }
+    struct event * event;
+    bpf_printk("sizeof event %d\n",sizeof(struct event*));
+    event = bpf_ringbuf_reserve(&rb,sizeof(*event),0);
+    if (!event)
+    {
+            bpf_printk("event error");
+            return 0;
+    }
+    event->eventname=3;
+    collect_event_pid_info(event);
+    collect_event_uid(event);
+     bpf_probe_read_kernel_str(&event->filename, sizeof(event->filename), filename);
+    bpf_get_current_comm(&event->comm, sizeof(event->comm));
+    bpf_ringbuf_submit(event, 0);
+}
